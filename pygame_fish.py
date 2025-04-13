@@ -38,37 +38,73 @@ font = pygame.font.Font(None, 36)  # Default font for text
 
 # Fish class
 class Fish:
-    def __init__(self, x, y, fish_type):
+    _id_counter = 0  # Class-level counter for unique IDs
+
+    def __init__(self, game, x, y, fish_type="Guppy", stage=1):
+        pygame.sprite.Sprite.__init__(self)
+        self.id = Fish._id_counter  # Assign unique ID
+        Fish._id_counter += 1
+        self.game = game
+        self.type = fish_type
+        self.stage = stage
+        self.max_stage = 5
+        self.gender = random.choice(["male", "female"])
+        self.hunger = 0
+        self.food_eaten = 0
+        self.food_needed = [3, 5, 7, 10, 0]
+        self.breeding_partner = None
+        self.collision_start_time = 0
+        self.breed_timer = 0
+        self.is_fertilized = False
+        self.last_breed_time = time.time()
+        self.breed_cooldown = 600  # 10 minutes
+        self.breed_delay = 120  # 2 minutes
+        self.required_collision_time = 2
         self.base_width = 40
         self.base_height = 30
-        self.type = fish_type
-        self.hunger = 0
-        self.stage = 1
-        self.max_stage = 5
-        self.size_multiplier = 1.0
-        self.food_eaten = 0  # Track total amount of food eaten for growth
-        self.food_needed = [2, 3, 4, 5, 6]  # Dynamic food requirement per stage
-        self.rect = pygame.Rect(x, y, self.base_width, self.base_height)
-        self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED)
+        self.size_multiplier = 1.0 + (self.stage - 1) * 0.2
+        self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED) or FISH_SPEED
         self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
-        self.target_seaweed = None
-        self.last_eat_time = time.time()  # Initialize with current time
-        self.eat_cooldown = 5.0  # 5 seconds cooldown between eating
+        self.rect = pygame.Rect(x, y, self.base_width, self.base_height)
+        self.last_eat_time = time.time()
+        self.eat_cooldown = 5.0
         self.animation_frame = 0
         self.animation_timer = 0
-        self.animation_speed = 0.15  # Seconds per frame
+        self.animation_speed = 0.15
         self.animation_frames = []
-        self.current_row = 2  # Start with middle row for normal swimming
-        
-        # Load initial fish animation frames (guppy_baby for stage 1)
-        self.load_animation_frames("guppy_baby")
-        self.base_image = self.animation_frames[1][0]  # Middle row, first frame as default
-        
-        # Update image and rect based on initial orientation
-        self.image = self.base_image
-        self.rect = self.image.get_rect(center=(x, y)) if self.base_image else pygame.Rect(x - 25, y - 15, 50, 30)
-        self.current_angle = 0  # Track current rotation angle
+        self.current_row = 2
+        self.current_angle = 0
         self.is_paused = False
+        self.time_scale = 1.0
+        # Feeding and movement attributes from provided code
+        self.target_seaweed = None
+        self.is_hungry = False
+        self.pause_timer = 0
+        self.swim_duration = random.uniform(2.0, 5.0)
+        self.pause_duration = random.uniform(1.0, 3.0)
+        self.current_speed = 0.5
+        self.movement_timer = 0
+        self.speed_variation = 1.0
+
+        # Load animation frames
+        if self.type == "Guppy":
+            if self.stage == 1:
+                self.load_animation_frames("guppy_baby")
+            else:
+                folder = "guppy_female" if self.gender == "female" else "guppy"
+                self.load_animation_frames(folder)
+        else:
+            self.load_animation_frames(f"{self.type.lower()}_baby")
+
+        self.base_image = self.animation_frames[1][0] if self.animation_frames else None
+        if self.base_image:
+            self.image = self.base_image
+            self.rect = self.image.get_rect(center=(x, y))
+        else:
+            self.image = None
+            self.rect = pygame.Rect(x - 25, y - 15, 50, 30)
+
+        print(f"Created fish ID {self.id}, Type: {self.type}, Stage: {self.stage}, Gender: {self.gender}")
 
     def load_animation_frames(self, folder_name):
         """Load animation frames from the specified folder"""
@@ -92,222 +128,247 @@ class Fish:
                 self.animation_frames.append(row_frames)
         except Exception as e:
             print(f"Error loading {folder_name} images: {e}")
-            self.base_image = None
             self.animation_frames = []
             fallback = pygame.Surface((50, 30), pygame.SRCALPHA)
             pygame.draw.rect(fallback, (255, 165, 0), (0, 0, 50, 30))
-            self.base_image = fallback
             self.animation_frames = [[fallback for _ in range(3)] for _ in range(3)]
 
     def update(self, dt):
-        # Update animation
+        if self.is_paused:
+            print(f"Fish ID {self.id} is paused")
+            return
+
+        scaled_dt = max(dt * self.time_scale, 0.001)
+
+        # Check for death due to hunger
+        if self.hunger >= 150 and not self.game.seaweed_list:
+            print(f"Fish ID {self.id} should die: Hunger {self.hunger}")
+            self.game.fish_list.remove(self)
+            self.game.coins = max(0, self.game.coins - 5)
+            return
+
+        # Handle breeding movement
+        if self.breeding_partner and self.collision_start_time > 0:
+            current_time = time.time()
+            collision_duration = current_time - self.collision_start_time
+
+            if collision_duration >= self.required_collision_time:
+                if self.gender == "female":
+                    self.is_fertilized = True
+                    self.breed_timer = self.breed_delay
+                self.last_breed_time = current_time
+                self.breeding_partner.last_breed_time = current_time
+                print(f"Breeding complete for Fish ID {self.id} with Partner ID {self.breeding_partner.id}")
+                self.game.breeding_in_progress = False
+                self.game.selected_fish_1 = None
+                self.game.selected_fish_2 = None
+                self.breeding_partner.breeding_partner = None
+                self.breeding_partner = None
+                self.collision_start_time = 0
+                # Resume normal movement
+                self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED) or FISH_SPEED
+                self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
+            else:
+                dx = self.breeding_partner.rect.centerx - self.rect.centerx
+                dy = self.breeding_partner.rect.centery - self.rect.centery
+                dist = math.hypot(dx, dy)
+                if dist > 5:
+                    self.speed_x = (dx / dist) * FISH_SPEED * 0.5
+                    self.speed_y = (dy / dist) * FISH_SPEED * 0.5
+                else:
+                    self.speed_x = 0
+                    self.speed_y = 0
+        else:
+            # Movement logic from provided code
+            self.pause_timer += scaled_dt
+            if self.pause_timer > self.swim_duration:
+                self.pause_timer = 0
+                self.swim_duration = random.uniform(2.0, 5.0)
+                self.pause_duration = random.uniform(1.0, 3.0)
+                if self.is_hungry:
+                    self.speed_x = random.uniform(-FISH_SPEED * 0.7, FISH_SPEED * 0.7)
+                    self.speed_y = random.uniform(-FISH_SPEED * 0.2, FISH_SPEED * 0.2)
+                else:
+                    self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED) or FISH_SPEED
+                    self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
+            elif self.pause_timer > self.swim_duration - 1.0:
+                self.speed_x *= 0.9
+                self.speed_y *= 0.9
+
+            # Move toward seaweed if hungry
+            if self.is_hungry and self.target_seaweed:
+                dx = self.target_seaweed.rect.centerx - self.rect.centerx
+                dy = self.target_seaweed.rect.centery - self.rect.centery
+                dist = math.hypot(dx, dy)
+                if dist > 5:
+                    hunger_speed_boost = min(1.3, 1.0 + (self.hunger - 30) / 70)
+                    self.speed_x = (dx / dist) * (FISH_SPEED * 0.7) * hunger_speed_boost
+                    self.speed_y = (dy / dist) * (FISH_SPEED * 0.3) * hunger_speed_boost
+                else:
+                    self.speed_x = 0
+                    self.speed_y = 0
+
+            # Speed variation
+            base_speed = 0.5
+            if self.hunger > 30 and self.target_seaweed:
+                target_speed = 0.8 + (self.hunger * 0.03)
+            else:
+                target_speed = base_speed + (math.sin(time.time() * 0.5) * 0.1)
+            size_factor = 1.0 + (1.0 - min(self.stage / 4, 1.0)) * 0.3
+            target_speed *= size_factor
+            self.current_speed += (target_speed - self.current_speed) * 0.1
+            self.movement_timer += scaled_dt
+            if self.movement_timer > random.uniform(0.8, 1.2):
+                self.movement_timer = 0
+                self.speed_variation = random.uniform(0.85, 1.15)
+            effective_speed = self.current_speed * self.speed_variation
+
+            # Update position
+            self.rect.x += self.speed_x * effective_speed * 60 * scaled_dt
+            self.rect.y += self.speed_y * effective_speed * 60 * scaled_dt
+
+            # Boundary checks
+            if self.rect.left < 0:
+                self.rect.left = 0
+                self.speed_x = abs(self.speed_x) * 0.8
+                print(f"Fish ID {self.id} hit left boundary")
+            elif self.rect.right > SCREEN_WIDTH:
+                self.rect.right = SCREEN_WIDTH
+                self.speed_x = -abs(self.speed_x) * 0.8
+                print(f"Fish ID {self.id} hit right boundary")
+            if self.rect.top < 0:
+                self.rect.top = 0
+                self.speed_y = abs(self.speed_y) * 0.8
+                print(f"Fish ID {self.id} hit top boundary")
+            elif self.rect.bottom > SCREEN_HEIGHT:
+                self.rect.bottom = SCREEN_HEIGHT
+                self.speed_y = -abs(self.speed_y) * 0.8
+                print(f"Fish ID {self.id} hit bottom boundary")
+
+        # Animation updates
         if self.animation_frames:
-            self.animation_timer += dt
+            self.animation_timer += scaled_dt
             if self.animation_timer >= self.animation_speed:
                 self.animation_timer = 0
                 self.animation_frame = (self.animation_frame + 1) % 3
-                
-                # Select row based on vertical movement
                 if self.speed_y < -0.2:
                     target_row = 0
                 elif self.speed_y > 0.2:
                     target_row = 2
                 else:
                     target_row = 1
-                
-                # Smoothly transition between rows
                 if target_row != self.current_row:
-                    if target_row > self.current_row:
-                        self.current_row = min(2, self.current_row + 1)
-                    else:
-                        self.current_row = max(0, self.current_row - 1)
-                
+                    self.current_row = target_row
                 self.base_image = self.animation_frames[self.current_row][self.animation_frame]
-        
-        # Hunger increases based on stage
-        self.hunger += dt * (0.5 + (self.stage - 1) * 0.125)
 
-        # Aquarium-like movement
-        if not hasattr(self, 'pause_timer'):
-            self.pause_timer = 0
-        if not hasattr(self, 'swim_duration'):
-            self.swim_duration = random.uniform(2.0, 5.0)
-        if not hasattr(self, 'pause_duration'):
-            self.pause_duration = random.uniform(1.0, 3.0)
-        if not hasattr(self, 'is_paused'):
-            self.is_paused = False
+        # Update hunger
+        self.hunger += scaled_dt * (0.5 + (self.stage - 1) * 0.125)
+        print(f"Fish ID {self.id} hunger updated to {self.hunger}")
 
-        self.pause_timer += dt
-        if self.is_paused:
-            if self.pause_timer > self.pause_duration:
-                self.is_paused = False
-                self.pause_timer = 0
-                self.swim_duration = random.uniform(2.0, 5.0)
-                self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED)
-                self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
-        else:
-            if self.pause_timer > self.swim_duration:
-                self.is_paused = True
-                self.pause_timer = 0
-                self.pause_duration = random.uniform(1.0, 3.0)
-                self.speed_x = 0
-                self.speed_y = 0
+        # Update breeding timer
+        if self.breed_timer > 0:
+            self.breed_timer -= scaled_dt
 
-        # Hunger behavior: move towards seaweed if hungry
-        if self.hunger > 3 and self.target_seaweed:
-            self.is_paused = False
-            
-            dx = self.target_seaweed.rect.centerx - self.rect.centerx
-            dy = self.target_seaweed.rect.centery - self.rect.centery
-            dist = math.hypot(dx, dy)
-            
-            if dist > 0:
-                if not hasattr(self, 'target_speed_x'):
-                    self.target_speed_x = 0
-                    self.target_speed_y = 0
-                    self.search_offset = 0
-                
-                if dist < 80:
-                    self.search_offset = math.sin(time.time() * 1.5) * 20
-                    dx += self.search_offset
-                
-                speed_factor = min(1.0, dist / 200.0) + 0.3
-                desired_speed_x = (dx / dist) * FISH_SPEED * speed_factor
-                desired_speed_y = (dy / dist) * FISH_SPEED * 0.3 * speed_factor
-                
-                wave_factor = math.sin(time.time() * 2.0) * 0.08
-                desired_speed_y += wave_factor
-                
-                lerp_factor = 0.08 if dist > 100 else 0.15
-                self.target_speed_x += (desired_speed_x - self.target_speed_x) * lerp_factor
-                self.target_speed_y += (desired_speed_y - self.target_speed_y) * lerp_factor
-                
-                approach_factor = min(1.0, (dist - 20) / 100.0)
-                approach_factor = max(0.2, approach_factor)
-                self.speed_x = self.target_speed_x * approach_factor
-                self.speed_y = self.target_speed_y * approach_factor
-                
-                random_scale = min(1.0, dist / 150.0) * 0.03
-                self.speed_x += random.uniform(-random_scale, random_scale)
-                self.speed_y += random.uniform(-random_scale * 0.5, random_scale * 0.5)
-        else:
-            if not self.is_paused and random.random() < 0.01:
-                self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED)
-                self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
-
-        # Rotate fish based on movement direction
+        # Update image and rotation
         if self.speed_x != 0 or self.speed_y != 0:
             movement_angle = math.degrees(math.atan2(-self.speed_y, abs(self.speed_x)))
-            
-            if abs(self.speed_y) < 0.1:
-                target_angle = 0
-            else:
-                target_angle = max(min(movement_angle, 30), -30)
-            
-            if not hasattr(self, 'current_angle'):
-                self.current_angle = target_angle
-            else:
-                self.current_angle += (target_angle - self.current_angle) * 0.15
-            
-            if self.base_image:
-                flipped_image = pygame.transform.flip(self.base_image, self.speed_x < 0, False)
-                rotation_angle = -self.current_angle if self.speed_x < 0 else self.current_angle
-                self.image = pygame.transform.rotate(flipped_image, rotation_angle)
-                self.rect = self.image.get_rect(center=self.rect.center)
-        else:
-            if self.base_image and hasattr(self, 'current_angle'):
-                flipped_image = pygame.transform.flip(self.base_image, self.speed_x < 0 if hasattr(self, 'speed_x') else False, False)
-                self.image = pygame.transform.rotate(flipped_image, self.current_angle)
-                self.rect = self.image.get_rect(center=self.rect.center)
+            target_angle = 0 if abs(self.speed_y) < 0.1 else max(min(movement_angle, 30), -30)
+            self.current_angle += (target_angle - self.current_angle) * 0.15
+        if self.base_image:
+            flipped_image = pygame.transform.flip(self.base_image, self.speed_x < 0, False)
+            rotation_angle = -self.current_angle if self.speed_x < 0 else self.current_angle
+            self.image = pygame.transform.rotate(flipped_image, rotation_angle)
+            self.rect = self.image.get_rect(center=self.rect.center)
 
-        # Update position
-        base_speed = 0.5
-        if self.hunger > 3 and self.target_seaweed:
-            target_speed = 0.8 + (self.hunger * 0.03)
-        else:
-            target_speed = base_speed + (math.sin(time.time() * 0.5) * 0.1)
-        
-        size_factor = 1.0 + (1.0 - min(self.stage / 4, 1.0)) * 0.3
-        target_speed *= size_factor
-        
-        if not hasattr(self, 'current_speed'):
-            self.current_speed = target_speed
-        else:
-            self.current_speed += (target_speed - self.current_speed) * 0.1
-        
-        if not hasattr(self, 'movement_timer'):
-            self.movement_timer = 0
-            self.speed_variation = 1.0
-        
-        self.movement_timer += dt
-        if self.movement_timer > random.uniform(0.8, 1.2):
-            self.movement_timer = 0
-            self.speed_variation = random.uniform(0.85, 1.15)
-        
-        effective_speed = self.current_speed * self.speed_variation
-        
-        self.rect.x += self.speed_x * effective_speed * 60 * dt
-        self.rect.y += self.speed_y * effective_speed * 60 * dt
-        
-        # Boundary checks
-        if self.rect.left < 0:
-            self.rect.left = 0
-            self.speed_x = abs(self.speed_x) * 0.8
-        elif self.rect.right > SCREEN_WIDTH:
-            self.rect.right = SCREEN_WIDTH
-            self.speed_x = -abs(self.speed_x) * 0.8
-        if self.rect.top < 0:
-            self.rect.top = 0
-            self.speed_y = abs(self.speed_y) * 0.8
-        elif self.rect.bottom > SCREEN_HEIGHT:
-            self.rect.bottom = SCREEN_HEIGHT
-            self.speed_y = -abs(self.speed_y) * 0.8
+    def collide_with_fish(self, other_fish):
+        """Handle collision only for selected breeding pairs"""
+        current_time = time.time()
+        if not (self.game.selected_fish_1 and self.game.selected_fish_2):
+            return
 
-    def update_orientation(self):
-        if self.speed_x > 0:
-            self.image = pygame.transform.flip(self.base_image, True, False)
-            self.image = pygame.transform.scale(self.image, (self.rect.width, self.rect.height))
-        else:
-            self.image = pygame.transform.scale(self.base_image, (self.rect.width, self.rect.height))
+        if not (self == self.game.selected_fish_1 and other_fish == self.game.selected_fish_2 or
+                self == self.game.selected_fish_2 and other_fish == self.game.selected_fish_1):
+            return
 
-        angle = 0
-        if self.speed_y > 0.5:
-            angle = -10
-        elif self.speed_y < -0.5:
-            angle = 10
-        if angle != self.current_angle:
-            self.image = pygame.transform.rotate(self.image, angle)
-            self.current_angle = angle
+        can_breed = (
+            self.stage == 5 and
+            other_fish.stage == 5 and
+            self.gender != other_fish.gender and
+            current_time - self.last_breed_time >= self.breed_cooldown and
+            current_time - other_fish.last_breed_time >= other_fish.breed_cooldown
+        )
+
+        if can_breed:
+            if self.collision_start_time == 0:
+                self.collision_start_time = current_time
+                self.breeding_partner = other_fish
+                other_fish.breeding_partner = self
+                other_fish.collision_start_time = current_time
+                print(f"Breeding collision started: Fish ID {self.id} with Fish ID {other_fish.id}")
+
+    def spawn_babies(self):
+        """Spawn baby fish when breeding timer is complete"""
+        current_time = time.time()
+        if (
+            self.stage == 5 and
+            self.gender == "female" and
+            self.is_fertilized and
+            self.breed_timer <= 0
+        ):
+            num_babies = random.randint(3, 6)
+            babies = []
+            for _ in range(num_babies):
+                baby_x = self.rect.centerx + random.uniform(-50, 50)
+                baby_y = self.rect.centery + random.uniform(-50, 50)
+                baby = Fish(self.game, baby_x, baby_y, "Guppy")
+                babies.append(baby)
+            self.is_fertilized = False
+            self.breed_timer = self.breed_delay
+            self.last_breed_time = current_time
+            print(f"Fish ID {self.id} spawned {num_babies} babies")
+            return babies
+        return []
 
     def scatter(self):
-        self.speed_x = random.uniform(-FISH_SPEED * 2, FISH_SPEED * 2)
+        self.speed_x = random.uniform(-FISH_SPEED * 2, FISH_SPEED * 2) or FISH_SPEED
         self.speed_y = random.uniform(-FISH_SPEED * 2, FISH_SPEED * 2)
+        print(f"Fish ID {self.id} scattered")
 
     def grow(self):
+        """Increase the fish's stage if it has eaten enough food"""
         if self.stage < self.max_stage and self.food_eaten >= self.food_needed[self.stage - 1]:
             self.stage += 1
-            self.size_multiplier = 1.0 + (self.stage - 1) * 0.3
-            print(f"Fish grew to stage {self.stage}! Size multiplier: {self.size_multiplier}")
-            folder = "guppy" if self.stage >= 2 else "guppy_baby"
-            self.load_animation_frames(folder)
-            self.base_image = self.animation_frames[self.current_row][self.animation_frame]
-            center = self.rect.center
-            self.rect.size = (int(50 * self.size_multiplier), int(30 * self.size_multiplier))
-            self.rect.center = center
+            self.size_multiplier = 1.0 + (self.stage - 1) * 0.2
+            self.food_eaten = 0
+            if self.type == "Guppy":
+                if self.stage == 1:
+                    self.load_animation_frames("guppy_baby")
+                else:
+                    folder = "guppy_female" if self.gender == "female" else "guppy"
+                    self.load_animation_frames(folder)
+            else:
+                self.load_animation_frames(f"{self.type.lower()}")
+            self.base_image = self.animation_frames[1][0] if self.animation_frames else None
+            if self.base_image:
+                self.image = self.base_image
+                self.rect = self.image.get_rect(center=self.rect.center)
+            else:
+                self.image = None
+                self.rect = pygame.Rect(self.rect.x - 25, self.rect.y - 15, 50, 30)
+            print(f"Fish ID {self.id} grew to stage {self.stage}")
 
     def eat_seaweed(self, seaweed):
+        """Eat seaweed on collision if cooldown allows"""
         current_time = time.time()
         time_since_last_eat = current_time - self.last_eat_time
         if time_since_last_eat >= self.eat_cooldown:
             self.last_eat_time = current_time
-            self.hunger = 0  # Fully reset hunger
+            self.hunger = 0
             self.food_eaten += 1
-            print(f"Fish ate seaweed! Type: {self.type}, Stage: {self.stage}, Food eaten: {self.food_eaten}, Hunger: {self.hunger}")
+            print(f"Fish ID {self.id} ate seaweed! Stage: {self.stage}, Food eaten: {self.food_eaten}")
             self.grow()
             return True
-        else:
-            print(f"Fish can't eat yet. Time since last eat: {time_since_last_eat:.2f}/{self.eat_cooldown}, Hunger: {self.hunger}")
-            return False
+        return False
 
     def draw(self, surface):
         if self.image:
@@ -315,6 +376,16 @@ class Fish:
             surface.blit(self.image, self.image.get_rect(center=center))
         else:
             pygame.draw.rect(surface, FISH_COLORS[self.type], self.rect)
+
+    def clear_breeding_state(self):
+        """Clear breeding-related state"""
+        if self.breeding_partner:
+            self.breeding_partner.breeding_partner = None
+            self.breeding_partner.collision_start_time = 0
+        self.breeding_partner = None
+        self.collision_start_time = 0
+        self.speed_x = random.uniform(-FISH_SPEED, FISH_SPEED) or FISH_SPEED
+        self.speed_y = random.uniform(-FISH_SPEED * 0.3, FISH_SPEED * 0.3)
 
 # Seaweed class
 class Seaweed:
@@ -338,7 +409,20 @@ class Button:
         text = font.render(self.text, True, WHITE)
         surface.blit(text, (self.rect.x + 10, self.rect.y + 10))
 
-# Shop button class
+# BreedButton class
+class BreedButton:
+    def __init__(self, x, y):
+        self.rect = pygame.Rect(x, y, 90, 40)
+        self.text = "Breed"
+        self.active = False
+
+    def draw(self, surface):
+        color = GREEN if self.active else (100, 100, 100)
+        pygame.draw.rect(surface, color, self.rect)
+        text = font.render(self.text, True, WHITE)
+        surface.blit(text, (self.rect.x + 10, self.rect.y + 10))
+
+# ShopButton class
 class ShopButton:
     def __init__(self, x, y):
         self.width = 40
@@ -357,9 +441,7 @@ class AquariumGame:
         pygame.display.set_caption("Aquarium Game")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 36)
-        
-        # Game state
-        self.coins = 20
+        self.coins = 200
         self.fish_list = []
         self.seaweed_list = []
         self.shop_items = {
@@ -381,26 +463,22 @@ class AquariumGame:
         self.auto_feed = False
         self.show_hunger_bar = True
         self.settings_open = False
-        
-        # Game control
         self.is_paused = False
         self.time_scale = 1.0
-        
-        # UI elements
+        self.selected_fish_1 = None
+        self.selected_fish_2 = None
+        self.breeding_in_progress = False
         self.shop_button = Button(SCREEN_WIDTH - 100, 10, 90, 40, "Shop")
+        self.breed_button = BreedButton(SCREEN_WIDTH - 100, 210)
         self.settings_button = Button(SCREEN_WIDTH - 100, 60, 90, 40, "Settings")
         self.pause_button = Button(SCREEN_WIDTH - 100, 110, 90, 40, "Pause")
         self.speed_1x_button = Button(SCREEN_WIDTH - 100, 160, 50, 40, "1x")
         self.speed_3x_button = Button(SCREEN_WIDTH - 150, 160, 50, 40, "3x")
         self.speed_6x_button = Button(SCREEN_WIDTH - 200, 160, 50, 40, "6x")
-        
-        # Seaweed quantity prompt UI
         self.seaweed_quantity_prompt = False
         self.seaweed_quantity_input = ""
         self.confirm_button = Button(360, 370, 90, 40, "Confirm")
         self.cancel_button = Button(460, 370, 90, 40, "Cancel")
-        
-        # Button rectangles for shop UI
         self.guppy_btn = None
         self.seaweed_btn = None
         self.sell_mode_btn = None
@@ -410,30 +488,28 @@ class AquariumGame:
     def update(self, dt):
         if self.is_paused:
             return
-        
-        scaled_dt = dt * self.time_scale
-        
-        dead_fish = [fish for fish in self.fish_list if fish.hunger >= 150 and not self.seaweed_list]
-        for fish in dead_fish:
-            self.fish_list.remove(fish)
-            self.coins = max(0, self.coins - 5)
-            print(f"Fish died of hunger! -5 coins, Hunger was: {fish.hunger}, Stage: {fish.stage}")
 
-        targeted_seaweed = set(fish.target_seaweed for fish in self.fish_list if fish.target_seaweed)
-        seaweed_counts = {sw: sum(1 for f in self.fish_list if f.target_seaweed == sw) for sw in targeted_seaweed}
+        scaled_dt = max(dt * self.time_scale, 0.001)
 
-        for fish in self.fish_list:
-            if fish.hunger > 60 and self.seaweed_list:
+        # Update fish
+        for fish in self.fish_list[:]:
+            # Feeding and targeting from provided code
+            if fish.hunger > 30 and self.seaweed_list:
+                targeted_seaweed = set(f.target_seaweed for f in self.fish_list if f.target_seaweed)
+                seaweed_counts = {sw: sum(1 for f in self.fish_list if f.target_seaweed == sw) for sw in targeted_seaweed}
                 nearest = min(self.seaweed_list,
-                            key=lambda s: ((s.rect.centerx - fish.rect.centerx)**2 +
-                                         (s.rect.centery - fish.rect.centery)**2)**0.5 +
-                                         (seaweed_counts.get(s, 0) * 50))
+                              key=lambda s: ((s.rect.centerx - fish.rect.centerx)**2 +
+                                            (s.rect.centery - fish.rect.centery)**2)**0.5 * 0.7 +
+                                            (seaweed_counts.get(s, 0) * 30))
                 fish.target_seaweed = nearest
+                fish.is_hungry = True
             else:
                 fish.target_seaweed = None
-                
+                fish.is_hungry = False
+
             fish.update(scaled_dt)
-            
+
+            # Check for seaweed collisions
             for seaweed in self.seaweed_list[:]:
                 fish_rect_expanded = fish.rect.inflate(20, 20)
                 if fish_rect_expanded.colliderect(seaweed.rect):
@@ -441,16 +517,25 @@ class AquariumGame:
                         self.seaweed_list.remove(seaweed)
                         fish.target_seaweed = None
                         next_food_needed = sum(fish.food_needed[:fish.stage])
-                        print(f"Fish ate seaweed! Type: {fish.type}, Stage: {fish.stage}, Food eaten: {fish.food_eaten}/{next_food_needed}, Hunger: {fish.hunger}")
+                        print(f"Fish ID {fish.id} ate seaweed! Type: {fish.type}, Stage: {fish.stage}, Food eaten: {fish.food_eaten}/{next_food_needed}")
                         break
 
-        # Updated income calculation with more pronounced stage scaling
+            # Check for breeding collisions
+            if self.breeding_in_progress and fish.breeding_partner:
+                dx = fish.rect.centerx - fish.breeding_partner.rect.centerx
+                dy = fish.rect.centery - fish.breeding_partner.rect.centery
+                distance = math.hypot(dx, dy)
+                if distance <= 50:
+                    fish.collide_with_fish(fish.breeding_partner)
+
+            # Spawn babies
+            if fish.gender == "female" and fish.is_fertilized and fish.breed_timer <= 0:
+                new_babies = fish.spawn_babies()
+                self.fish_list.extend(new_babies)
+
+        # Update coins
         base_income = 0.02
-        total_income = 0
-        for fish in self.fish_list:
-            # Income scales more noticeably with stage: 1x, 2x, 4x, 7x, 11x
-            stage_multiplier = 1 + (fish.stage - 1) * (fish.stage / 2)
-            total_income += base_income * stage_multiplier
+        total_income = sum(base_income * (1 + (fish.stage - 1) * (fish.stage / 2)) for fish in self.fish_list)
         self.coins += total_income * scaled_dt
 
         if self.auto_feed:
@@ -475,7 +560,6 @@ class AquariumGame:
                 hunger_ratio = 1 - (min(fish.hunger, max_hunger) / max_hunger)
                 bar_width = int(fish.rect.width * hunger_ratio)
                 bar_color = (0, 255, 0) if hunger_ratio > 0.5 else (255, 255, 0) if hunger_ratio > 0.25 else (255, 0, 0)
-                
                 hunger_bar_rect = pygame.Rect(
                     fish.rect.x,
                     fish.rect.y - 7,
@@ -484,7 +568,6 @@ class AquariumGame:
                 )
                 pygame.draw.rect(surface, bar_color, hunger_bar_rect)
 
-        # Draw shop button
         pygame.draw.rect(surface, (0, 128, 0), self.shop_button.rect)
         shop_text = self.font.render("Shop", True, WHITE)
         surface.blit(shop_text, (self.shop_button.rect.x + 10, self.shop_button.rect.y + 10))
@@ -497,11 +580,20 @@ class AquariumGame:
         self.speed_3x_button.draw(surface)
         self.speed_6x_button.draw(surface)
 
+        self.breed_button.active = (self.selected_fish_1 and self.selected_fish_2 and
+                                   not self.breeding_in_progress and
+                                   self.selected_fish_1.stage == 5 and
+                                   self.selected_fish_2.stage == 5 and
+                                   self.selected_fish_1.gender != self.selected_fish_2.gender)
+        self.breed_button.draw(surface)
+
+        if self.selected_fish_1:
+            pygame.draw.rect(surface, (0, 255, 0), self.selected_fish_1.rect, 2)
+        if self.selected_fish_2:
+            pygame.draw.rect(surface, (255, 255, 0), self.selected_fish_2.rect, 2)
+
         base_income = 0.02
-        total_income_rate = 0
-        for fish in self.fish_list:
-            stage_multiplier = 1 + (fish.stage - 1) * (fish.stage / 2)
-            total_income_rate += base_income * stage_multiplier
+        total_income_rate = sum(base_income * (1 + (fish.stage - 1) * (fish.stage / 2)) for fish in self.fish_list)
         stats = [
             f"Fish: {len(self.fish_list)}",
             f"Seaweed: {len(self.seaweed_list)}",
@@ -524,38 +616,31 @@ class AquariumGame:
             guppy_text = self.font.render(f"Buy Guppy ({self.shop_items['Guppy']} coins)", True, WHITE)
             surface.blit(guppy_text, (guppy_btn.x + 20, guppy_btn.y + 10))
             
-            # Draw seaweed buttons with different quantities
             seaweed_cost = self.shop_items["Seaweed"]
-            
-            # 1 Seaweed button
             one_btn = pygame.Rect(260, 270, 80, 40)
             one_color = GREEN if self.coins >= seaweed_cost * 1 else RED
             pygame.draw.rect(surface, one_color, one_btn)
             one_text = self.font.render("1", True, WHITE)
             surface.blit(one_text, (one_btn.x + 30, one_btn.y + 10))
             
-            # 10 Seaweed button
             ten_btn = pygame.Rect(350, 270, 80, 40)
             ten_color = GREEN if self.coins >= seaweed_cost * 10 else RED
             pygame.draw.rect(surface, ten_color, ten_btn)
             ten_text = self.font.render("10", True, WHITE)
             surface.blit(ten_text, (ten_btn.x + 25, ten_btn.y + 10))
             
-            # 100 Seaweed button
             hundred_btn = pygame.Rect(440, 270, 100, 40)
             hundred_color = GREEN if self.coins >= seaweed_cost * 100 else RED
             pygame.draw.rect(surface, hundred_color, hundred_btn)
             hundred_text = self.font.render("100", True, WHITE)
             surface.blit(hundred_text, (hundred_btn.x + 25, hundred_btn.y + 10))
             
-            # Auto Feed button
             auto_feed_btn = pygame.Rect(260, 320, 280, 40)
             auto_feed_color = GREEN if self.auto_feed else RED
             pygame.draw.rect(surface, auto_feed_color, auto_feed_btn)
             auto_feed_text = self.font.render("Auto Feed", True, WHITE)
             surface.blit(auto_feed_text, (auto_feed_btn.x + 20, auto_feed_btn.y + 10))
             
-            # Seaweed cost label
             cost_text = self.font.render(f"Seaweed: {seaweed_cost} coins each", True, WHITE)
             surface.blit(cost_text, (260, 370))
             
@@ -569,7 +654,6 @@ class AquariumGame:
             close_text = self.font.render("Close Shop", True, WHITE)
             surface.blit(close_text, (close_btn.x + 20, close_btn.y + 10))
 
-            # Store button rects for event handling
             self.guppy_btn = guppy_btn
             self.seaweed_buttons = {
                 1: one_btn,
@@ -624,14 +708,12 @@ class AquariumGame:
             title_text = self.font.render("Settings", True, WHITE)
             surface.blit(title_text, (SCREEN_WIDTH // 2 - title_text.get_width() // 2, SCREEN_HEIGHT // 4 + 20))
             
-            # Hunger bar toggle button
             hunger_bar_btn = pygame.Rect(260, 220, 280, 40)
             hunger_bar_color = GREEN if self.show_hunger_bar else RED
             pygame.draw.rect(surface, hunger_bar_color, hunger_bar_btn)
             hunger_bar_text = self.font.render("Show Hunger Bar", True, WHITE)
             surface.blit(hunger_bar_text, (hunger_bar_btn.x + 20, hunger_bar_btn.y + 10))
             
-            # Close button
             close_btn = pygame.Rect(260, 270, 280, 40)
             pygame.draw.rect(surface, RED, close_btn)
             close_text = self.font.render("Close Settings", True, WHITE)
@@ -646,7 +728,6 @@ class AquariumGame:
         elif event.type == pygame.MOUSEBUTTONDOWN:
             mouse_pos = event.pos
             if self.shop_open:
-                # Handle Seaweed buttons
                 if self.seaweed_buttons:
                     for quantity, btn in self.seaweed_buttons.items():
                         if btn.collidepoint(mouse_pos):
@@ -658,21 +739,17 @@ class AquariumGame:
                                     return True
                             except ValueError:
                                 print(f"Invalid quantity: {quantity}")
-                # Buy Guppy
                 if self.guppy_btn and self.guppy_btn.collidepoint(mouse_pos):
                     self.selected_item = "Guppy"
                     self.buy_fish("Guppy")
                     return True
-                # Auto Feed
                 if self.auto_feed_btn and self.auto_feed_btn.collidepoint(mouse_pos):
                     self.auto_feed = not self.auto_feed
                     return True
-                # Toggle Selling Mode
                 elif self.sell_mode_btn and self.sell_mode_btn.collidepoint(mouse_pos):
                     self.is_selling_mode = not self.is_selling_mode
                     self.shop_open = False
                     return True
-                # Close Shop
                 elif self.close_btn and self.close_btn.collidepoint(mouse_pos):
                     self.shop_open = False
                     return True
@@ -726,11 +803,40 @@ class AquariumGame:
                             self.selected_fish = fish
                             self.sell_fish(fish)
                             return True
+                elif self.breed_button.rect.collidepoint(mouse_pos) and self.breed_button.active:
+                    if self.selected_fish_1 and self.selected_fish_2:
+                        self.breeding_in_progress = True
+                        self.selected_fish_1.breeding_partner = self.selected_fish_2
+                        self.selected_fish_2.breeding_partner = self.selected_fish_1
+                        self.selected_fish_1.collision_start_time = time.time()
+                        self.selected_fish_2.collision_start_time = time.time()
+                        print(f"Breeding initiated: Fish ID {self.selected_fish_1.id} with Fish ID {self.selected_fish_2.id}")
+                    return True
                 else:
                     for fish in self.fish_list:
                         if fish.rect.collidepoint(mouse_pos):
-                            self.selected_fish = fish
-                            self.fish_details_open = True
+                            if fish.stage == 5:
+                                if not self.selected_fish_1:
+                                    self.selected_fish_1 = fish
+                                    print(f"Selected Fish ID {fish.id} ({fish.gender})")
+                                elif not self.selected_fish_2 and fish != self.selected_fish_1:
+                                    self.selected_fish_2 = fish
+                                    print(f"Selected Fish ID {fish.id} ({fish.gender})")
+                                    if self.selected_fish_1.gender == self.selected_fish_2.gender:
+                                        print(f"Same gender: Fish ID {self.selected_fish_1.id} and ID {self.selected_fish_2.id}")
+                                        self.selected_fish_1.scatter()
+                                        self.selected_fish_2.scatter()
+                                        self.selected_fish_1 = None
+                                        self.selected_fish_2 = None
+                                elif fish == self.selected_fish_1:
+                                    self.selected_fish_1 = None
+                                    print(f"Unselected Fish ID {fish.id}")
+                                elif fish == self.selected_fish_2:
+                                    self.selected_fish_2 = None
+                                    print(f"Unselected Fish ID {fish.id}")
+                            else:
+                                self.selected_fish = fish
+                                self.fish_details_open = True
                             return True
         return True
 
@@ -750,14 +856,14 @@ class AquariumGame:
         cost = 8 if type_ == "Guppy" else 12
         if self.coins >= cost:
             self.coins -= cost
-            self.fish_list.append(Fish(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, type_))
+            self.fish_list.append(Fish(self, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, type_))
 
     def sell_fish(self, fish):
         base_price = 3
         sell_price = base_price * (1.0 + (fish.stage - 1) * 0.4)
         self.coins += sell_price
         self.fish_list.remove(fish)
-        print(f"Sold fish for {sell_price:.1f} coins! Stage: {fish.stage}")
+        print(f"Sold Fish ID {fish.id} for {sell_price:.1f} coins! Stage: {fish.stage}")
         if not hasattr(self, 'fish_sold'):
             self.fish_sold = 0
         self.fish_sold += 1
@@ -770,10 +876,8 @@ class AquariumGame:
         self.fish_details_open = False
         self.selected_fish = None
 
-# Create game instance
 game = AquariumGame()
 
-# Game loop
 running = True
 while running:
     for event in pygame.event.get():
